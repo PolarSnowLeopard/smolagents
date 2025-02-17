@@ -74,15 +74,30 @@ logger = getLogger(__name__)
 
 
 def get_variable_names(self, template: str) -> Set[str]:
+    """
+    从包含 Jinja2 模板语法的字符串中提取所有变量名
+    示例：
+    ```python
+        template = "Hello {{name}}, your age is {{age}}"
+        variables = get_variable_names(template)
+    ```
+    返回: {'name', 'age'}
+    """
     pattern = re.compile(r"\{\{([^{}]+)\}\}")
     return {match.group(1).strip() for match in pattern.finditer(template)}
 
 
 def populate_template(template: str, variables: Dict[str, Any]) -> str:
+    # 创建一个 Jinja2 模板对象
+    # StrictUndefined 表示当变量未定义时会抛出错误而不是静默处理
     compiled_template = Template(template, undefined=StrictUndefined)
+
     try:
+        # 使用提供的变量渲染模板
+        # **variables 将字典展开为关键字参数
         return compiled_template.render(**variables)
     except Exception as e:
+        # 如果渲染过程出错，抛出更详细的错误信息
         raise Exception(f"Error during jinja template rendering: {type(e).__name__}: {e}")
 
 
@@ -98,12 +113,17 @@ class PlanningPromptTemplate(TypedDict):
         update_plan_pre_messages (`str`): Update plan pre-messages prompt.
         update_plan_post_messages (`str`): Update plan post-messages prompt.
     """
-
+    # 初始事实提示模板 - 用于收集任务相关的初始信息
     initial_facts: str
+    # 初始计划提示模板 - 用于制定初始行动计划
     initial_plan: str
+    # 更新事实前的消息模板 - 在更新事实前的提示
     update_facts_pre_messages: str
+    # 更新事实后的消息模板 - 在更新事实后的提示
     update_facts_post_messages: str
+    # 更新计划前的消息模板 - 在更新计划前的提示
     update_plan_pre_messages: str
+    # 更新计划后的消息模板 - 在更新计划后的提示
     update_plan_post_messages: str
 
 
@@ -223,36 +243,51 @@ class MultiStepAgent:
 
         self.managed_agents = {}
         if managed_agents is not None:
+            # 确保每个受管理代理都有名称和描述
             for managed_agent in managed_agents:
                 assert managed_agent.name and managed_agent.description, (
                     "All managed agents need both a name and a description!"
                 )
+            # 创建以代理名称为键的字典
             self.managed_agents = {agent.name: agent for agent in managed_agents}
 
+        # 收集所有工具和受管理代理的名称
         tool_and_managed_agent_names = [tool.name for tool in tools]
         if managed_agents is not None:
             tool_and_managed_agent_names += [agent.name for agent in managed_agents]
+        # 检查是否有重复名称
         if len(tool_and_managed_agent_names) != len(set(tool_and_managed_agent_names)):
+            # 如果有重复，找出重复的名称并抛出错误
             raise ValueError(
                 "Each tool or managed_agent should have a unique name! You passed these duplicate names: "
                 f"{[name for name in tool_and_managed_agent_names if tool_and_managed_agent_names.count(name) > 1]}"
             )
 
+        # 确保所有工具都是Tool类的实例
         for tool in tools:
             assert isinstance(tool, Tool), f"This element is not of class Tool: {str(tool)}"
+        # 创建以工具名称为键的字典
         self.tools = {tool.name: tool for tool in tools}
 
         if add_base_tools:
             for tool_name, tool_class in TOOL_MAPPING.items():
+                 # 对于ToolCallingAgent，跳过python_interpreter工具
                 if tool_name != "python_interpreter" or self.__class__.__name__ == "ToolCallingAgent":
                     self.tools[tool_name] = tool_class()
+        # 添加FinalAnswerTool到工具集
         self.tools["final_answer"] = FinalAnswerTool()
 
+        # 初始化系统提示
         self.system_prompt = self.initialize_system_prompt()
+        # 初始化输入消息
         self.input_messages = None
+        # 初始化任务
         self.task = None
+        # 创建AgentMemory对象，用于存储代理的记忆
         self.memory = AgentMemory(self.system_prompt)
+        # 创建AgentLogger对象，用于记录代理的日志
         self.logger = AgentLogger(level=verbosity_level)
+        # 创建Monitor对象，用于监控代理的性能
         self.monitor = Monitor(self.model, self.logger)
         self.step_callbacks = step_callbacks if step_callbacks is not None else []
         self.step_callbacks.append(self.monitor.update_metrics)
@@ -296,16 +331,22 @@ class MultiStepAgent:
             split_token (`str`): Separator for the action. Should match the example in the system prompt.
         """
         try:
+            # 使用分隔符拆分输出
             split = model_output.split(split_token)
+
+            # 获取最后两个部分
+            # 使用从末尾开始的索引(-2, -1)是为了处理可能存在多个分隔符的情况
             rationale, action = (
                 split[-2],
                 split[-1],
             )  # NOTE: using indexes starting from the end solves for when you have more than one split_token in the output
         except Exception:
+            # 如果解析失败，抛出错误
             raise AgentParsingError(
                 f"No '{split_token}' token provided in your output.\nYour output:\n{model_output}\n. Be sure to include an action, prefaced with '{split_token}'!",
                 self.logger,
             )
+        # 返回处理后的推理过程和动作（去除首尾空白）
         return rationale.strip(), action.strip()
 
     def provide_final_answer(self, task: str, images: Optional[list[str]]) -> str:
@@ -319,6 +360,7 @@ class MultiStepAgent:
         Returns:
             `str`: Final answer to the task.
         """
+        # 1. 创建系统消息
         messages = [
             {
                 "role": MessageRole.SYSTEM,
@@ -330,9 +372,15 @@ class MultiStepAgent:
                 ],
             }
         ]
+
+        # 2. 如果有图片，添加图片类型
         if images:
             messages[0]["content"].append({"type": "image"})
+
+        # 3. 添加历史记忆消息（跳过第一条系统消息）
         messages += self.write_memory_to_messages()[1:]
+
+        # 4. 添加最终用户消息（包含任务信息）
         messages += [
             {
                 "role": MessageRole.USER,
@@ -347,9 +395,11 @@ class MultiStepAgent:
             }
         ]
         try:
+            # 使用模型生成最终答案
             chat_message: ChatMessage = self.model(messages)
             return chat_message.content
         except Exception as e:
+            # 如果生成过程出错，返回错误信息
             return f"Error in generating final LLM output:\n{e}"
 
     def execute_tool_call(self, tool_name: str, arguments: Union[Dict[str, str], str]) -> Any:
@@ -361,21 +411,28 @@ class MultiStepAgent:
             tool_name (`str`): Name of the Tool to execute (should be one from self.tools).
             arguments (Dict[str, str]): Arguments passed to the Tool.
         """
+        # 合并工具和受管理代理为一个字典
         available_tools = {**self.tools, **self.managed_agents}
+        # 检查工具名称是否在可用工具中
         if tool_name not in available_tools:
             error_msg = f"Unknown tool {tool_name}, should be instead one of {list(available_tools.keys())}."
             raise AgentExecutionError(error_msg, self.logger)
 
         try:
+            # 处理字符串参数
             if isinstance(arguments, str):
                 if tool_name in self.managed_agents:
                     observation = available_tools[tool_name].__call__(arguments)
                 else:
                     observation = available_tools[tool_name].__call__(arguments, sanitize_inputs_outputs=True)
+
+            # 处理字典参数
             elif isinstance(arguments, dict):
+                # 替换状态变量
                 for key, value in arguments.items():
                     if isinstance(value, str) and value in self.state:
                         arguments[key] = self.state[value]
+                # 执行调用
                 if tool_name in self.managed_agents:
                     observation = available_tools[tool_name].__call__(**arguments)
                 else:
@@ -383,8 +440,10 @@ class MultiStepAgent:
             else:
                 error_msg = f"Arguments passed to tool should be a dict or string: got a {type(arguments)}."
                 raise AgentExecutionError(error_msg, self.logger)
+            # 返回观察结果
             return observation
         except Exception as e:
+            # 工具执行错误
             if tool_name in self.tools:
                 tool = self.tools[tool_name]
                 error_msg = (
@@ -429,19 +488,27 @@ class MultiStepAgent:
         ```
         """
 
+        # 设置任务
         self.task = task
+
+        # 处理额外参数
         if additional_args is not None:
             self.state.update(additional_args)
+            # 将额外参数信息添加到任务描述中
             self.task += f"""
 You have been provided with these additional arguments, that you can access using the keys as variables in your python code:
 {str(additional_args)}."""
 
+        # 初始化系统提示
         self.system_prompt = self.initialize_system_prompt()
         self.memory.system_prompt = SystemPromptStep(system_prompt=self.system_prompt)
+
+        # 如果需要重置，清空记忆和监控
         if reset:
             self.memory.reset()
             self.monitor.reset()
 
+        # 记录任务信息
         self.logger.log_task(
             content=self.task.strip(),
             subtitle=f"{type(self.model).__name__} - {(self.model.model_id if hasattr(self.model, 'model_id') else '')}",
@@ -449,12 +516,15 @@ You have been provided with these additional arguments, that you can access usin
             title=self.name if hasattr(self, "name") else None,
         )
 
+        # 将任务添加到记忆步骤中
         self.memory.steps.append(TaskStep(task=self.task, task_images=images))
 
         if stream:
             # The steps are returned as they are executed through a generator to iterate on.
+            # 流式模式：返回生成器，可以逐步获取执行结果
             return self._run(task=self.task, images=images)
         # Outputs are returned only at the end as a string. We only look at the last step
+        # 非流式模式：返回最后一个步骤的输出
         return deque(self._run(task=self.task, images=images), maxlen=1)[0]
 
     def _run(self, task: str, images: List[str] | None = None) -> Generator[ActionStep | AgentType, None, None]:
@@ -468,23 +538,29 @@ You have been provided with these additional arguments, that you can access usin
         final_answer = None
         self.step_number = 1
         while final_answer is None and self.step_number <= self.max_steps:
+            # 记录步骤开始时间
             step_start_time = time.time()
+            # 创建ActionStep对象，用于记录步骤信息
             memory_step = ActionStep(
                 step_number=self.step_number,
                 start_time=step_start_time,
                 observations_images=images,
             )
             try:
+                # 按间隔执行规划步骤
                 if self.planning_interval is not None and self.step_number % self.planning_interval == 1:
                     self.planning_step(
                         task,
                         is_first_step=(self.step_number == 1),
                         step=self.step_number,
                     )
+                # 记录步骤信息
                 self.logger.log_rule(f"Step {self.step_number}", level=LogLevel.INFO)
 
                 # Run one step!
                 final_answer = self.step(memory_step)
+
+                # 如果有最终答案，进行检查
                 if final_answer is not None and self.final_answer_checks is not None:
                     for check_function in self.final_answer_checks:
                         try:
@@ -495,9 +571,14 @@ You have been provided with these additional arguments, that you can access usin
             except AgentError as e:
                 memory_step.error = e
             finally:
+                # 记录步骤结束时间和持续时间
                 memory_step.end_time = time.time()
                 memory_step.duration = memory_step.end_time - step_start_time
+
+                # 保存步骤到记忆
                 self.memory.steps.append(memory_step)
+
+                # 执行回调函数
                 for callback in self.step_callbacks:
                     # For compatibility with old callbacks that don't take the agent as an argument
                     if len(inspect.signature(callback).parameters) == 1:
@@ -509,7 +590,9 @@ You have been provided with these additional arguments, that you can access usin
 
         if final_answer is None and self.step_number == self.max_steps + 1:
             error_message = "Reached max steps."
+            # 强制生成最终答案
             final_answer = self.provide_final_answer(task, images)
+            # 创建最终步骤记录
             final_memory_step = ActionStep(
                 step_number=self.step_number, error=AgentMaxStepsError(error_message, self.logger)
             )
@@ -537,6 +620,7 @@ You have been provided with these additional arguments, that you can access usin
             step (`int`): The number of the current step, used as an indication for the LLM.
         """
         if is_first_step:
+            # 1. 收集初始事实
             input_messages = [
                 {
                     "role": MessageRole.USER,
